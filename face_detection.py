@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import subprocess
 
 neural_network = cv2.dnn.readNetFromCaffe("./deploy.prototxt", "./res10_300x300_ssd_iter_140000.caffemodel") #needed to download pretrained model for face detection from github
 
@@ -22,11 +23,42 @@ def detect_faces(input_frame):
             
     return input_frame
 
-stream = cv2.VideoCapture(0)
+rtmp_input_url = "rtmp://127.0.0.1/live/eric"  # Where the Raspberry Pi streams unprocessed video
+rtmp_output_url = "rtmp://127.0.0.1/play/eric"   # Where the processed video will be published
+
+stream = cv2.VideoCapture(rtmp_input_url)
 
 if not stream.isOpened():
     print("No Stream Detected. Check camera connection.")
     exit()
+
+# Retrieve stream properties for proper encoding
+width = int(stream.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = stream.get(cv2.CAP_PROP_FPS)
+if fps <= 0:
+    fps = 25  # default FPS if detection fails
+
+# Setup FFmpeg process to push the processed frames to the RTMP output
+ffmpeg_cmd = [
+    "ffmpeg",
+    "-y",
+    "-f", "rawvideo",
+    "-vcodec", "rawvideo",
+    "-pix_fmt", "bgr24",
+    "-s", f"{width}x{height}",
+    "-r", str(fps),
+    "-i", "-",               # Read video from stdin
+    "-c:v", "libx264",
+    "-pix_fmt", "yuv420p",
+    "-preset", "veryfast",
+    "-f", "flv",
+    rtmp_output_url          # Push the processed stream to this RTMP URL
+]
+
+process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+
+print("Streaming processed video to:", rtmp_output_url)
 
 while(True):
     ret, frame = stream.read()
@@ -35,14 +67,22 @@ while(True):
         print("stream has ended or camera error.")
         break
 
-    frame = detect_faces(frame)
-    cv2.imshow("webcam", frame)
-
-    if cv2.waitKey(1) == ord('q'):
+    processed_frame = detect_faces(frame)
+    
+    try:
+        process.stdin.write(processed_frame.tobytes())
+    except BrokenPipeError:
+        print("FFmpeg process closed the pipe.")
         break
+    # cv2.imshow("webcam", frame)
+
+    # if cv2.waitKey(1) == ord('q'):
+    #     break
 
 stream.release()
-cv2.destroyAllWindows()
+process.stdin.close()
+process.wait()
+# cv2.destroyAllWindows()
 
 
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
