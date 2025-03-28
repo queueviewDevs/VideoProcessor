@@ -23,8 +23,8 @@ def detect_faces(input_frame):
             
     return input_frame
 
-rtmp_input_url = "rtmp://127.0.0.1/live/pi_0001"  # Where the Raspberry Pi streams unprocessed video
-rtmp_output_url = "rtmp://127.0.0.1/play/pi_0001"   # Where the processed video will be published
+rtmp_input_url = "rtmp://queueview.ca/rawfeed/pi_0001"  # Where the Raspberry Pi streams unprocessed video
+rtmp_output_url = "rtmp://queueview.ca/processed/pi_0001"   # Where the processed video will be published
 
 stream = cv2.VideoCapture(rtmp_input_url)
 
