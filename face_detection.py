@@ -1,3 +1,8 @@
+import os
+# Suppress verbose MediaPipe / absl‑log spam before *anything* from mediapipe is imported
+# 0 = INFO, 1 = WARNING, 2 = ERROR, 3 = FATAL
+os.environ["GLOG_minloglevel"] = "2"
+
 import cv2
 import mediapipe as mp
 import os
@@ -6,6 +11,10 @@ import subprocess
 # Initialize MediaPipe Face Detection
 mp_face_detection = mp.solutions.face_detection
 mp_drawing = mp.solutions.drawing_utils
+
+face_detector = mp_face_detection.FaceDetection(
+    model_selection=0, min_detection_confidence=0.5
+)
 
 # Load face covers
 face_covers = [cv2.imread(os.path.join("./smileys/", f), cv2.IMREAD_UNCHANGED) for f in sorted(os.listdir("./smileys/")) if f.endswith(".png")]
@@ -27,36 +36,33 @@ def add_face_cover(background, cover, x, y, w, h, scale=1.5):
         background[y:y+h, x:x+w] = cover_resized
 
 def detect_faces(input_frame):
-    with mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5) as face_detection:
-        # Convert the frame to RGB (MediaPipe requires RGB input)
-        rgb_frame = cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB)
-        results = face_detection.process(rgb_frame)
+    results = face_detector.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-        if results.detections:
-            for detection in results.detections:
-                bboxC = detection.location_data.relative_bounding_box
-                ih, iw, _ = input_frame.shape
-                x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+    if results.detections:
+        for detection in results.detections:
+            bboxC = detection.location_data.relative_bounding_box
+            ih, iw, _ = input_frame.shape
+            x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
 
-                # Expand the bounding box
-                padding = 0.5  # Adjust padding as needed
-                pad_x = int(w * padding)
-                pad_y = int(h * padding)
-                x = max(0, x - pad_x)
-                y = max(0, y - pad_y)
-                w = min(iw - x, w + 2 * pad_x)
-                h = min(ih - y, h + 2 * pad_y)
+            # Expand the bounding box
+            padding = 0.5  # Adjust padding as needed
+            pad_x = int(w * padding)
+            pad_y = int(h * padding)
+            x = max(0, x - pad_x)
+            y = max(0, y - pad_y)
+            w = min(iw - x, w + 2 * pad_x)
+            h = min(ih - y, h + 2 * pad_y)
 
-                # Blur the detected face
-                face_region = input_frame[y:y+h, x:x+w]
-                blurred_face = cv2.blur(face_region, (50, 50))
-                input_frame[y:y+h, x:x+w] = blurred_face
+            # Blur the detected face
+            face_region = input_frame[y:y+h, x:x+w]
+            blurred_face = cv2.blur(face_region, (50, 50))
+            input_frame[y:y+h, x:x+w] = blurred_face
 
-                # Add the face cover
-                cover = face_covers[0]  # Use the first face cover (or cycle through them if needed)
-                add_face_cover(input_frame, cover, x, y, w, h)
+            # Add the face cover
+            cover = face_covers[0]  # Use the first face cover (or cycle through them if needed)
+            add_face_cover(input_frame, cover, x, y, w, h)
 
-        return input_frame
+    return input_frame
 
 rtmp_input_url = "rtmp://15.156.160.96/live/pi_0001"  # Where the Raspberry Pi streams unprocessed video
 rtmp_output_url = "rtmp://15.156.160.96/play/pi_0001"   # Where the processed video will be published
@@ -77,7 +83,7 @@ while True:
     height = int(stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = stream.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
-        fps = 25  # default FPS if detection fails
+        fps = 30  # default FPS if detection fails
 
     # Setup FFmpeg process to push the processed frames to the RTMP output
     ffmpeg_cmd = [
@@ -90,16 +96,33 @@ while True:
         "-s", f"{width}x{height}",
         "-r", str(fps),
         "-i", "-",
-        #--------encoding-------------
+        
+        #--------encoding cpu-------------
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-vf",  "format=yuv420p",          # explicit colour-space convert
+        # "-preset", "veryfast",
+        # "-tune", "zerolatency",
+        "-vf",  "format=nv12",          # explicit colour-space convert
         "-g",   str(fps*2),                # 2-second GOP
         "-bf",  "0",                       # no B-frames
         "-b:v", "2000k",                   # target bitrate 2.5 Mb/s  (adjust ↕)
-        "-maxrate", "2700k",
-        "-bufsize", "5400k",
+        "-maxrate", "2000k",
+        "-bufsize", "4000k",
+        "-profile:v", "high",          # baseline | main | high
+        "-quality", "speed",           # speed | balanced | quality
+        "-rc", "cbr",                  # constant-bit-rate
+
+        #---------encoding gpu-----------
+        # "-vf", "format=nv12",          # colour-space for AMF
+        # "-c:v",  "h264_amf",
+        # "-profile:v", "high",          # baseline | main | high
+        # "-quality", "speed",           # speed | balanced | quality
+        # "-rc", "cbr",                  # constant-bit-rate
+        # "-b:v",  "2000k",
+        # "-maxrate", "2000k",
+        # "-bufsize","4000k",
+        # "-g", str(fps*2),
+        # "-bf", "0",
+
         # ---------- NO AUDIO ----------
         "-an",                             # tell FFmpeg “video-only”
         # ---------- OUTPUT ----------
