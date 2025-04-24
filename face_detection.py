@@ -58,8 +58,8 @@ def detect_faces(input_frame):
 
         return input_frame
 
-rtmp_input_url = "rtmp://localhost/live/pi_0001"  # Where the Raspberry Pi streams unprocessed video
-rtmp_output_url = "rtmp://localhost/play/pi_0001"   # Where the processed video will be published
+rtmp_input_url = "rtmp://15.156.160.96/live/pi_0001"  # Where the Raspberry Pi streams unprocessed video
+rtmp_output_url = "rtmp://15.156.160.96/play/pi_0001"   # Where the processed video will be published
 
 while True:
     while True:
@@ -82,18 +82,29 @@ while True:
     # Setup FFmpeg process to push the processed frames to the RTMP output
     ffmpeg_cmd = [
         "ffmpeg",
-        "-y",
+        "-loglevel", "info",
+        "-fflags", "nobuffer",
+        #------raw input from opencv--------
         "-f", "rawvideo",
-        "-vcodec", "rawvideo",
         "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}",
         "-r", str(fps),
-        "-i", "-",               # Read video from stdin
+        "-i", "-",
+        #--------encoding-------------
         "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-vf",  "format=yuv420p",          # explicit colour-space convert
+        "-g",   str(fps*2),                # 2-second GOP
+        "-bf",  "0",                       # no B-frames
+        "-b:v", "2000k",                   # target bitrate 2.5 Mb/s  (adjust ↕)
+        "-maxrate", "2700k",
+        "-bufsize", "5400k",
+        # ---------- NO AUDIO ----------
+        "-an",                             # tell FFmpeg “video-only”
+        # ---------- OUTPUT ----------
         "-f", "flv",
-        rtmp_output_url          # Push the processed stream to this RTMP URL
+        rtmp_output_url
     ]
 
     process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
