@@ -1,24 +1,14 @@
 import cv2
-import numpy as np
+import mediapipe as mp
 import os
 import subprocess
-import threading
-import queue
-import time
-import shutil
 
-# Load DNN model
-neural_network = cv2.dnn.readNetFromCaffe("./deploy.prototxt", "./res10_300x300_ssd_iter_140000.caffemodel")
+# Initialize MediaPipe Face Detection
+mp_face_detection = mp.solutions.face_detection
+mp_drawing = mp.solutions.drawing_utils
 
 # Load face covers
-face_covers = [cv2.imread(os.path.join("./smileys/", f), cv2.IMREAD_UNCHANGED)
-               for f in sorted(os.listdir("./smileys/")) if f.endswith(".png")]
-
-# Use OpenCL if available (may help on AMD)
-cv2.ocl.setUseOpenCL(True)
-
-# Thread-safe frame queue
-frame_queue = queue.Queue(maxsize=10)
+face_covers = [cv2.imread(os.path.join("./smileys/", f), cv2.IMREAD_UNCHANGED) for f in sorted(os.listdir("./smileys/")) if f.endswith(".png")]
 
 def add_face_cover(background, cover, x, y, w, h, scale=1.5):
     new_w = int(w * scale)
@@ -36,75 +26,60 @@ def add_face_cover(background, cover, x, y, w, h, scale=1.5):
     else:
         background[y:y+h, x:x+w] = cover_resized
 
-def detect_faces(frame, padding=0.2):
-    h, w = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104, 177, 123))
-    neural_network.setInput(blob)
-    detections = neural_network.forward()
+def detect_faces(input_frame):
+    with mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5) as face_detection:
+        # Convert the frame to RGB (MediaPipe requires RGB input)
+        rgb_frame = cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB)
+        results = face_detection.process(rgb_frame)
 
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x1, y1, x2, y2 = box.astype("int")
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
+        if results.detections:
+            for detection in results.detections:
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, _ = input_frame.shape
+                x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
 
-            # Expand box
-            padX = int((x2 - x1) * padding)
-            padY = int((y2 - y1) * padding)
-            x1, y1 = max(0, x1 - padX), max(0, y1 - padY)
-            x2, y2 = min(w, x2 + padX), min(h, y2 + padY)
+                # Expand the bounding box
+                padding = 0.5  # Adjust padding as needed
+                pad_x = int(w * padding)
+                pad_y = int(h * padding)
+                x = max(0, x - pad_x)
+                y = max(0, y - pad_y)
+                w = min(iw - x, w + 2 * pad_x)
+                h = min(ih - y, h + 2 * pad_y)
 
-            roi = frame[y1:y2, x1:x2]
-            blurred = cv2.GaussianBlur(roi, (31, 31), 0)
-            frame[y1:y2, x1:x2] = blurred
+                # Blur the detected face
+                face_region = input_frame[y:y+h, x:x+w]
+                blurred_face = cv2.blur(face_region, (50, 50))
+                input_frame[y:y+h, x:x+w] = blurred_face
 
-            if face_covers:
-                cover = face_covers[i % len(face_covers)]
-                add_face_cover(frame, cover, x1, y1, x2 - x1, y2 - y1)
-    return frame
+                # Add the face cover
+                cover = face_covers[0]  # Use the first face cover (or cycle through them if needed)
+                add_face_cover(input_frame, cover, x, y, w, h)
 
-def get_encoder():
-    encoders = subprocess.check_output(['ffmpeg', '-hide_banner', '-encoders']).decode()
-    return "h264_amf" if "h264_amf" in encoders else "libx264"
+        return input_frame
 
-def stream_reader(url):
-    cap = cv2.VideoCapture(url)
-    if not cap.isOpened():
-        print("Could not open stream.")
-        return None, None, None
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0: fps = 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    def reader_loop():
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if not frame_queue.full():
-                frame_queue.put(frame)
-        cap.release()
-
-    thread = threading.Thread(target=reader_loop, daemon=True)
-    thread.start()
-    return fps, width, height
-
-rtmp_input_url = "rtmp://15.156.160.96/live/pi_0001"
-rtmp_output_url = "rtmp://15.156.160.96/play/pi_0001"
+rtmp_input_url = "rtmp://localhost/live/pi_0001"  # Where the Raspberry Pi streams unprocessed video
+rtmp_output_url = "rtmp://localhost/play/pi_0001"   # Where the processed video will be published
 
 while True:
-    print("Waiting for RTMP stream...")
-    fps, width, height = stream_reader(rtmp_input_url)
-    if fps is None:
-        time.sleep(2)
-        continue
+    while True:
+        print("Attempting to look for video")
+        stream = cv2.VideoCapture(rtmp_input_url)
 
-    encoder = get_encoder()
-    print(f"Using encoder: {encoder}")
+        if not stream.isOpened():
+            print("No Stream Detected. Check camera connection.")
+            continue
+        else:
+            break
 
+    # Retrieve stream properties for proper encoding
+    width = int(stream.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(stream.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = stream.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25  # default FPS if detection fails
+
+    # Setup FFmpeg process to push the processed frames to the RTMP output
     ffmpeg_cmd = [
         "ffmpeg",
         "-y",
@@ -113,69 +88,35 @@ while True:
         "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}",
         "-r", str(fps),
-        "-i", "-"
-    ]
-
-    if encoder == "h264_amf":
-        ffmpeg_cmd += [
-            "-c:v", "h264_amf",
-            "-quality", "speed",           # Use AMD-specific quality setting
-            "-tune", "zerolatency",
-            "-bf", "0",
-        ]
-    else:
-        ffmpeg_cmd += [
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-bf", "0",
-            "-threads", "auto",
-        ]
-
-    ffmpeg_cmd += [
+        "-i", "-",               # Read video from stdin
+        "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
-        "-flush_packets", "1",
-        "-rtmp_live", "live",
+        "-preset", "veryfast",
         "-f", "flv",
-        rtmp_output_url
+        rtmp_output_url          # Push the processed stream to this RTMP URL
     ]
 
-    process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, bufsize=10**8)
-    print("Started FFmpeg, streaming to:", rtmp_output_url)
+    process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
-    try:
-        frame_interval = 1.0 / fps
-        frame_counter = 0
-        last_processed_frame = None
+    print("Streaming processed video to:", rtmp_output_url)
 
-        while True:
-            start_time = time.time()
-            if frame_queue.empty():
-                time.sleep(0.005)
-                continue
+    while True:
+        ret, frame = stream.read()
+        if not ret:
+            print("stream.read() returned false.")
+            print("stream has ended or camera error.")
+            break
 
-            frame = frame_queue.get()
-            frame_counter += 1
+        processed_frame = detect_faces(frame)
 
-            if frame_counter % 1 == 0:  # Skip every other frame
-                last_processed_frame = detect_faces(frame)
-            elif last_processed_frame is not None:
-                # reuse last processed frame
-                pass
-            else:
-                last_processed_frame = frame
+        try:
+            process.stdin.write(processed_frame.tobytes())
+        except BrokenPipeError:
+            print("FFmpeg process closed the pipe.")
+            break
 
-            try:
-                process.stdin.write(last_processed_frame.tobytes())
-            except BrokenPipeError:
-                print("FFmpeg pipe closed.")
-                break
 
-            elapsed = time.time() - start_time
-            if elapsed < frame_interval:
-                time.sleep(frame_interval - elapsed)
-    finally:
-        process.stdin.close()
-        process.wait()
-        process.kill()
-        print("Restarting stream...")
+    stream.release()
+    process.stdin.close()
+    process.wait()
+    process.kill()
